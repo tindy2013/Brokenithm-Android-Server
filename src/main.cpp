@@ -194,6 +194,25 @@ enum
     FUNCTION_CARD
 };
 
+std::tuple<std::string, uint16_t> getSocksAddress(const std::string &data)
+{
+    char cAddr[128] = {};
+    std::string retAddr, port_str = data.substr(1, 2);
+    int family = data[0];
+    uint16_t port = ntohs(*(short*)port_str.data());
+    switch(family)
+    {
+    case 1: //IPv4
+        inet_ntop(AF_INET, data.data() + 3, cAddr, 127);
+        break;
+    case 2: //IPv6
+        inet_ntop(AF_INET6, data.data() + 3, cAddr, 127);
+        break;
+    }
+    retAddr.assign(cAddr);
+    return std::make_tuple(retAddr, port);
+}
+
 void InputReceive(SOCKET sHost, char *memory)
 {
     char buffer[BUFSIZ];
@@ -207,13 +226,21 @@ void InputReceive(SOCKET sHost, char *memory)
             continue;
         if(real_len >= 3 + 6 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P')
         {
-            memcpy(memory, buffer + 4, 6 + 32);
+            memcpy(memory, buffer + 4, 32 + 6);
             if(real_len > 3 + 6 + 32)
             {
                 memcpy(memory + 6 + 32 + 96, buffer + 4 + 6 + 32, real_len - (3 + 6 + 32));
             }
         }
-        if(real_len >= 4 && buffer[1] == 'F' && buffer[2] == 'N' && buffer[3] == 'C')
+        else if(real_len >= 3 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P') /// without air block
+        {
+            memcpy(memory, buffer + 4, 32);
+            if(real_len > 3 + 32)
+            {
+                memcpy(memory + 6 + 32 + 96, buffer + 4 + 6 + 32, real_len - (3 + 32));
+            }
+        }
+        else if(real_len >= 4 && buffer[1] == 'F' && buffer[2] == 'N' && buffer[3] == 'C')
         {
             switch(buffer[4])
             {
@@ -225,21 +252,16 @@ void InputReceive(SOCKET sHost, char *memory)
                 break;
             }
         }
-        if(real_len >= 23 && buffer[1] == 'C' && buffer[2] == 'O' && buffer[3] == 'N')
+        else if(real_len >= 10 && buffer[1] == 'C' && buffer[2] == 'O' && buffer[3] == 'N')
         {
-            remote_address.assign(buffer + 4, 15);
-            auto epos = remote_address.find_last_not_of('\0');
-            if(epos == std::string::npos)
-                continue;
-            remote_address.erase(epos + 1);
-            std::string port;
-            port.assign(buffer + 4 + 15, 5);
-            remote_port = std::stoi(port);
+            std::string data;
+            data.assign(buffer + 4, real_len - 3);
+            std::tie(remote_address, remote_port) = getSocksAddress(data);
             //std::cout << "Device " << remote_address << ":" << remote_port << " connected." <<std::endl;
             printf("Device %s:%d connected.\n", remote_address.data(), remote_port);
             CONNECTED = true;
         }
-        if(real_len >= 3 && buffer[1] == 'D' && buffer[2] == 'I' && buffer[3] == 'S')
+        else if(real_len >= 3 && buffer[1] == 'D' && buffer[2] == 'I' && buffer[3] == 'S')
         {
             CONNECTED = false;
             if(tcp_mode)
@@ -255,7 +277,7 @@ void InputReceive(SOCKET sHost, char *memory)
                 remote_address.clear();
             }
         }
-        if(real_len >= 11 && buffer[1] == 'P' && buffer[2] == 'I' && buffer[3] == 'N')
+        else if(real_len >= 11 && buffer[1] == 'P' && buffer[2] == 'I' && buffer[3] == 'N')
         {
             if(!CONNECTED)
                 continue;
