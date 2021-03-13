@@ -8,7 +8,7 @@ ENDIF()
 SET(CMAKE_CXX_STANDARD 17)
 
 IF (NOT WIN32)
-	MESSAGE(FATAL_ERROR "This is not supposed to be run on non-Windows platforms!")
+    MESSAGE(FATAL_ERROR "This is not supposed to be run on non-Windows platforms!")
 ENDIF()
 
 
@@ -19,7 +19,8 @@ ELSE()
 ENDIF()
 
 ADD_EXECUTABLE(brokenithm 
-    src/main.cpp)
+    src/main.cpp
+    src/resources.rc)
 INCLUDE_DIRECTORIES(src)
 LINK_DIRECTORIES(${CMAKE_SOURCE_DIR})
 

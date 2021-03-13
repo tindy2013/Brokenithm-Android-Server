@@ -2,9 +2,11 @@
 #include <atomic>
 #include <thread>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include "socket.h"
 #include "defer.h"
+#include "version.h"
 #include <windows.h>
 
 std::string remote_address;
@@ -219,15 +221,15 @@ void updatePacketId(uint32_t newPacketId)
 {
     if(last_input_packet_id > newPacketId)
     {
-        fprintf(stderr, "[WARN] Packet #%zu came too late\n", newPacketId);
+        fprintf(stderr, "[WARN] Packet #%" PRIu32 " came too late\n", newPacketId);
     }
     else if(newPacketId > last_input_packet_id + 1)
     {
-        fprintf(stderr, "[WARN] Packets between #%zu and #%zu total %zu packet(s) are missing, probably too late or dropped\n", last_input_packet_id, newPacketId, newPacketId - last_input_packet_id - 1);
+        fprintf(stderr, "[WARN] Packets between #%" PRIu32 " and #%" PRIu32 " total %" PRIu32 " packet(s) are missing, probably too late or dropped\n", last_input_packet_id, newPacketId, newPacketId - last_input_packet_id - 1);
     }
     else if(newPacketId == last_input_packet_id)
     {
-        fprintf(stderr, "[WARN] Packet #%zu duplicated\n", newPacketId);
+        fprintf(stderr, "[WARN] Packet #%" PRIu32 " duplicated\n", newPacketId);
     }
     last_input_packet_id = newPacketId;
 }
@@ -352,7 +354,7 @@ void printInfo()
     printf("=================================================\n");
     printf("=          Brokenithm-Evolved-Android:          =\n");
     printf("=     Brokenithm with full IO over network      =\n");
-    printf("=                v0.1 by XTindy                 =\n");
+    printf("=               " VERSION " by XTindy                =\n");
     printf("=              Original: esterTion              =\n");
     printf("=================================================\n\n");
 }
