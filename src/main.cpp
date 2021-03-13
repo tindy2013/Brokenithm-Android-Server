@@ -213,32 +213,89 @@ std::tuple<std::string, uint16_t> getSocksAddress(const std::string &data)
     return std::make_tuple(retAddr, port);
 }
 
+uint32_t last_input_packet_id = 0;
+
+void updatePacketId(uint32_t newPacketId)
+{
+    if(last_input_packet_id > newPacketId)
+    {
+        fprintf(stderr, "[WARN] Packet #%zu came too late\n", newPacketId);
+    }
+    else if(newPacketId > last_input_packet_id + 1)
+    {
+        fprintf(stderr, "[WARN] Packets between #%zu and #%zu total %zu packet(s) are missing, probably too late or dropped\n", last_input_packet_id, newPacketId, newPacketId - last_input_packet_id - 1);
+    }
+    else if(newPacketId == last_input_packet_id)
+    {
+        fprintf(stderr, "[WARN] Packet #%zu duplicated\n", newPacketId);
+    }
+    last_input_packet_id = newPacketId;
+}
+
 void InputReceive(SOCKET sHost, char *memory)
 {
+    constexpr size_t tcp_recv_buffer_size = 128;
+    char recv_buffer[tcp_recv_buffer_size];
     char buffer[BUFSIZ];
+    std::string remains;
     while(!EXIT_FLAG)
     {
-        int recv_len;
-        if((recv_len = recvfrom(sHost, buffer, BUFSIZ - 1, 0, NULL, NULL)) == -1)
-            continue;
-        int real_len = buffer[0];
-        if(real_len > recv_len)
-            continue;
-        if(real_len >= 3 + 6 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P')
+        int recv_len, real_len;
+        uint32_t current_packet_id;
+        if(!tcp_mode)
         {
-            memcpy(memory, buffer + 4, 32 + 6);
-            if(real_len > 3 + 6 + 32)
-            {
-                memcpy(memory + 6 + 32 + 96, buffer + 4 + 6 + 32, real_len - (3 + 6 + 32));
-            }
+            /**
+                on UDP mode data is sent as packets, so just receive into a buffer big enough for 1 packet
+                each recvfrom call will only get 1 packet of data, the remaining data is discarded
+            **/
+
+            if((recv_len = recvfrom(sHost, buffer, BUFSIZ - 1, 0, NULL, NULL)) == -1)
+                continue;
+            real_len = buffer[0];
+            if(real_len > recv_len)
+                continue;
         }
-        else if(real_len >= 3 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P') /// without air block
+        else
+        {
+            /**
+                on TCP mode data is sent as stream, one recvfrom call may receive multiple packets
+                so we need to store the remaining data when real_len > recv_len
+            **/
+            if(remains.size() < 48)
+            {
+                if((recv_len = recv(sHost, recv_buffer, tcp_recv_buffer_size - 1, 0)) == -1)
+                    continue;
+                remains.append(recv_buffer, recv_len);
+            }
+
+            int data_left = remains.size();
+            real_len = remains[0];
+            if(real_len > data_left)
+                continue;
+            size_t data_copied = real_len + 1;
+            memcpy(buffer, remains.data(), data_copied);
+            remains.erase(0, data_copied);
+        }
+
+        if(real_len >= 3 + 4 + 6 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P')
+        {
+            memcpy(memory, buffer + 4 + 4, 32 + 6);
+            if(real_len > 3 + 4 + 6 + 32)
+            {
+                memcpy(memory + 6 + 32 + 96, buffer + 4 + 4 + 6 + 32, real_len - (3 + 6 + 32 + 4));
+            }
+            current_packet_id = ntohl(*(uint32_t*)(buffer + 4));
+            updatePacketId(current_packet_id);
+        }
+        else if(real_len >= 3 + 4 + 32 && buffer[1] == 'I' && buffer[2] == 'P' && buffer[3] == 'T') /// without air block
         {
             memcpy(memory, buffer + 4, 32);
-            if(real_len > 3 + 32)
+            if(real_len > 3 + 4 + 32)
             {
-                memcpy(memory + 6 + 32 + 96, buffer + 4 + 6 + 32, real_len - (3 + 32));
+                memcpy(memory + 6 + 32 + 96, buffer + 4 + 4 + 32, real_len - (3 + 32 + 4));
             }
+            current_packet_id = ntohl(*(uint32_t*)(buffer + 4));
+            updatePacketId(current_packet_id);
         }
         else if(real_len >= 4 && buffer[1] == 'F' && buffer[2] == 'N' && buffer[3] == 'C')
         {
@@ -254,6 +311,7 @@ void InputReceive(SOCKET sHost, char *memory)
         }
         else if(real_len >= 10 && buffer[1] == 'C' && buffer[2] == 'O' && buffer[3] == 'N')
         {
+            last_input_packet_id = 0;
             std::string data;
             data.assign(buffer + 4, real_len - 3);
             std::tie(remote_address, remote_port) = getSocksAddress(data);
