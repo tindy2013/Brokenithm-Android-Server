@@ -3,6 +3,7 @@
 #include <thread>
 #include <unistd.h>
 #include <inttypes.h>
+#include <sys/time.h>
 
 #include "socket.h"
 #include "defer.h"
@@ -13,6 +14,9 @@ std::string remote_address;
 uint16_t remote_port = 52468;
 uint16_t server_port = 52468;
 bool tcp_mode = false;
+
+size_t tcp_buffer_size = 96;
+size_t tcp_receive_threshold = 48;
 
 std::atomic_bool EXIT_FLAG {false}, CONNECTED {false};
 
@@ -58,6 +62,40 @@ int udp_send(SOCKET sHost, const std::string &dst_host, uint16_t dst_port, const
     return sendto(sHost, data.data(), data.size(), 0, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
 }
 
+std::string getTime(int type)
+{
+    time_t lt;
+    char tmpbuf[32], cMillis[7];
+    std::string format;
+    timeval tv;
+    gettimeofday(&tv, NULL);
+    snprintf(cMillis, 7, "%.6ld", (long)tv.tv_usec);
+    lt = time(NULL);
+    struct tm *local = localtime(&lt);
+    switch(type)
+    {
+    case 1:
+        format = "%Y%m%d-%H%M%S";
+        break;
+    case 2:
+        format = "%Y/%m/%d %a %H:%M:%S." + std::string(cMillis);
+        break;
+    case 3:
+        format = "%Y-%m-%d %H:%M:%S";
+        break;
+    }
+    strftime(tmpbuf, 32, format.data(), local);
+    return std::string(tmpbuf);
+}
+
+template <typename... Args>
+void printErr(const char* format, Args... args)
+{
+    std::string time = "[" + getTime(2) + "] ";
+    fprintf(stderr, time.data());
+    fprintf(stderr, format, args...);
+}
+
 void UDPLEDBroadcast(SOCKET sHost, const char* memory)
 {
     static std::string previous_status;
@@ -93,7 +131,7 @@ void UDPLEDBroadcast(SOCKET sHost, const char* memory)
             if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
             {
                 //std::cerr<<"cannot send broadcast: error " + std::to_string(GetLastError()) + "\n";
-                fprintf(stderr, "cannot send packet: error %lu\n", GetLastError());
+                printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
             }
             skip_count = 0;
         }
@@ -106,7 +144,7 @@ void UDPLEDBroadcast(SOCKET sHost, const char* memory)
                 if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
                 {
                     //std::cerr<<"cannot send broadcast: error " + std::to_string(GetLastError()) + "\n";
-                    fprintf(stderr, "cannot send packet: error %lu\n", GetLastError());
+                    printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
                 }
                 skip_count = 0;
             }
@@ -148,14 +186,14 @@ void TCPLEDBroadcast(SOCKET sHost, const char* memory)
             current_status.insert(0, head);
             if(send(sHost, current_status.data(), current_status.size(), 0) < 0)
             {
-                fprintf(stderr, "cannot send packet: error %lu\n", GetLastError());
+                printErr("[Error] Cannot send packet: error %lu\n", GetLastError());
                 if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
                 {
                     continue;
                 }
                 else
                 {
-                    fprintf(stderr, "Device disconnected!");
+                    printErr("[INFO] Device disconnected!");
                     CONNECTED = false;
                     EXIT_FLAG = true;
                     break;
@@ -170,14 +208,14 @@ void TCPLEDBroadcast(SOCKET sHost, const char* memory)
                 current_status.insert(0, head);
                 if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
                 {
-                    fprintf(stderr, "cannot send packet: error %lu\n", GetLastError());
+                    printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
                     if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         continue;
                     }
                     else
                     {
-                        fprintf(stderr, "Device disconnected!\n");
+                        printErr("[INFO] Device disconnected!\n");
                         CONNECTED = false;
                         EXIT_FLAG = true;
                         break;
@@ -221,23 +259,22 @@ void updatePacketId(uint32_t newPacketId)
 {
     if(last_input_packet_id > newPacketId)
     {
-        fprintf(stderr, "[WARN] Packet #%" PRIu32 " came too late\n", newPacketId);
+        printErr("[WARN] Packet #%" PRIu32 " came too late\n", newPacketId);
     }
     else if(newPacketId > last_input_packet_id + 1)
     {
-        fprintf(stderr, "[WARN] Packets between #%" PRIu32 " and #%" PRIu32 " total %" PRIu32 " packet(s) are missing, probably too late or dropped\n", last_input_packet_id, newPacketId, newPacketId - last_input_packet_id - 1);
+        printErr("[WARN] Packets between #%" PRIu32 " and #%" PRIu32 " total %" PRIu32 " packet(s) are missing, probably too late or dropped\n", last_input_packet_id, newPacketId, newPacketId - last_input_packet_id - 1);
     }
     else if(newPacketId == last_input_packet_id)
     {
-        fprintf(stderr, "[WARN] Packet #%" PRIu32 " duplicated\n", newPacketId);
+        printErr("[WARN] Packet #%" PRIu32 " duplicated\n", newPacketId);
     }
     last_input_packet_id = newPacketId;
 }
 
 void InputReceive(SOCKET sHost, char *memory)
 {
-    constexpr size_t tcp_recv_buffer_size = 128;
-    char recv_buffer[tcp_recv_buffer_size];
+    char recv_buffer[tcp_buffer_size];
     char buffer[BUFSIZ];
     std::string remains;
     while(!EXIT_FLAG)
@@ -263,9 +300,9 @@ void InputReceive(SOCKET sHost, char *memory)
                 on TCP mode data is sent as stream, one recvfrom call may receive multiple packets
                 so we need to store the remaining data when real_len > recv_len
             **/
-            if(remains.size() < 48)
+            if(remains.size() < tcp_receive_threshold)
             {
-                if((recv_len = recv(sHost, recv_buffer, tcp_recv_buffer_size - 1, 0)) == -1)
+                if((recv_len = recv(sHost, recv_buffer, tcp_buffer_size - 1, 0)) == -1)
                     continue;
                 remains.append(recv_buffer, recv_len);
             }
@@ -318,7 +355,7 @@ void InputReceive(SOCKET sHost, char *memory)
             data.assign(buffer + 4, real_len - 3);
             std::tie(remote_address, remote_port) = getSocksAddress(data);
             //std::cout << "Device " << remote_address << ":" << remote_port << " connected." <<std::endl;
-            printf("Device %s:%d connected.\n", remote_address.data(), remote_port);
+            printErr("[INFO] Device %s:%d connected.\n", remote_address.data(), remote_port);
             CONNECTED = true;
         }
         else if(real_len >= 3 && buffer[1] == 'D' && buffer[2] == 'I' && buffer[3] == 'S')
@@ -327,12 +364,12 @@ void InputReceive(SOCKET sHost, char *memory)
             if(tcp_mode)
             {
                 EXIT_FLAG = true;
-                printf("Device disconnected!\n");
+                printErr("[INFO] Device disconnected!\n");
                 break;
             }
             if(!remote_address.empty())
             {
-                printf("Device %s:%d disconnected.\n", remote_address.data(), remote_port);
+                printErr("[INFO] Device %s:%d disconnected.\n", remote_address.data(), remote_port);
                 //std::cout << "Device " << remote_address << ":" << remote_port << " disconnected." << std::endl;
                 remote_address.clear();
             }
@@ -362,7 +399,7 @@ void printInfo()
 void checkArgs(int argc, char* argv[])
 {
     int opt;
-    while((opt = getopt(argc, argv, "p:T")) != -1)
+    while((opt = getopt(argc, argv, "p:Tr:")) != -1)
     {
         switch(opt)
         {
@@ -371,6 +408,10 @@ void checkArgs(int argc, char* argv[])
             break;
         case 'T':
             tcp_mode = true;
+            break;
+        case 'r':
+            tcp_receive_threshold = atoi(optarg);
+            tcp_buffer_size = tcp_receive_threshold * 2;
             break;
         }
     }
@@ -386,7 +427,7 @@ int main(int argc, char* argv[])
     if(WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
         //std::cerr << "WSA startup failed!\n";
-        fprintf(stderr, "WSA startup failed!\n");
+        printErr("[ERROR] WSA startup failed!\n");
         return -1;
     }
     const char *memFileName = "Local\\BROKENITHM_SHARED_BUFFER";
@@ -397,7 +438,7 @@ int main(int argc, char* argv[])
         if(hMapFile == NULL)
         {
             //std::cerr << "CreateFileMapping failed! Error " + std::to_string(GetLastError());
-            fprintf(stderr, "CreateFileMapping failed! error: %lu\n", GetLastError());
+            printErr("[ERROR] CreateFileMapping failed! error: %lu\n", GetLastError());
             return -1;
         }
     }
@@ -406,12 +447,12 @@ int main(int argc, char* argv[])
     if(memory == nullptr)
     {
         //std::cerr << "Cannot get view of memory map! Error " + std::to_string(GetLastError());
-        fprintf(stderr, "Cannot get view of memory map! error: %lu\n", GetLastError());
+        printErr("[ERROR] Cannot get view of memory map! error: %lu\n", GetLastError());
         return -1;
     }
     if(!tcp_mode)
     {
-        printf("Mode: UDP\n");
+        printErr("[INFO] Mode: UDP\n");
         SOCKET sHost = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         defer(closesocket(sHost))
         setTimeout(sHost, 2000);
@@ -419,19 +460,21 @@ int main(int argc, char* argv[])
         setsockopt(sHost, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<char*>(&broadcastEnable), sizeof(broadcastEnable));
         socket_bind(sHost, htonl(INADDR_ANY), server_port);
         //std::cout << "Waiting for device on port " << server_port << "..." << std::endl;
-        printf("Waiting for device on port %d...\n", server_port);
+        printErr("[INFO] Waiting for device on port %d...\n", server_port);
         auto LEDThread = std::thread(UDPLEDBroadcast, sHost, memory);
         auto InputThread = std::thread(InputReceive, sHost, memory);
         while(_getwch() != L'q');
         //std::cout << "Exiting gracefully..." << std::endl;
-        printf("Exiting gracefully...\n");
+        printErr("[INFO] Exiting gracefully...\n");
         EXIT_FLAG = true;
         LEDThread.join();
         InputThread.join();
     }
     else
     {
-        printf("Mode: TCP\n");
+        printErr("[INFO] Mode: TCP\n");
+        printErr("[INFO] TCP receive buffer size: %" PRIu32 "\n", tcp_buffer_size);
+        printErr("[INFO] TCP receive threshold: %" PRIu32 "\n", tcp_receive_threshold);
         SOCKET sHost = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         defer(closesocket(sHost));
         setTimeout(sHost, 50);
@@ -439,7 +482,7 @@ int main(int argc, char* argv[])
         listen(sHost, 10);
         while(true)
         {
-            printf("Waiting for device on port %d...\n", server_port);
+            printErr("[INFO] Waiting for device on port %d...\n", server_port);
             struct sockaddr_in user_socket = {};
             socklen_t sock_size = sizeof(struct sockaddr_in);
             SOCKET acc_socket = accept(sHost, (struct sockaddr *)&user_socket, &sock_size);
@@ -448,7 +491,7 @@ int main(int argc, char* argv[])
             const char* user_address = inet_ntop(AF_INET, &user_socket.sin_addr, buffer, 20);
             if(user_address != NULL)
             {
-                printf("Device %s:%d connected.\n", user_address, user_socket.sin_port);
+                printErr("[INFO] Device %s:%d connected.\n", user_address, user_socket.sin_port);
             }
             CONNECTED = true;
             EXIT_FLAG = false;
@@ -456,7 +499,7 @@ int main(int argc, char* argv[])
             auto InputThread = std::thread(InputReceive, acc_socket, memory);
             while(_getwch() != L'q');
             //std::cout << "Exiting gracefully..." << std::endl;
-            printf("Exiting gracefully...\n");
+            printErr("[INFO] Exiting gracefully...\n");
             EXIT_FLAG = true;
             CONNECTED = false;
             LEDThread.join();
