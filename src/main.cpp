@@ -193,7 +193,7 @@ void TCPLEDBroadcast(SOCKET sHost, const char* memory)
                 }
                 else
                 {
-                    printErr("[INFO] Device disconnected!");
+                    printErr("[INFO] Device disconnected!\n");
                     CONNECTED = false;
                     EXIT_FLAG = true;
                     break;
