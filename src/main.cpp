@@ -328,7 +328,7 @@ void InputReceive(SOCKET sHost, char *memory)
         }
         else if(real_len >= 3 + 4 + 32 && buffer[1] == 'I' && buffer[2] == 'P' && buffer[3] == 'T') /// without air block
         {
-            memcpy(memory, buffer + 4, 32);
+            memcpy(memory + 6, buffer + 4 + 4, 32);
             if(real_len > 3 + 4 + 32)
             {
                 memcpy(memory + 6 + 32 + 96, buffer + 4 + 4 + 32, real_len - (3 + 32 + 4));
