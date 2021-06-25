@@ -466,6 +466,7 @@ int main(int argc, char* argv[])
         while(_getwch() != L'q');
         //std::cout << "Exiting gracefully..." << std::endl;
         printErr("[INFO] Exiting gracefully...\n");
+        last_input_packet_id = 0;
         EXIT_FLAG = true;
         LEDThread.join();
         InputThread.join();
@@ -497,13 +498,14 @@ int main(int argc, char* argv[])
             EXIT_FLAG = false;
             auto LEDThread = std::thread(TCPLEDBroadcast, acc_socket, memory);
             auto InputThread = std::thread(InputReceive, acc_socket, memory);
-            while(_getwch() != L'q');
-            //std::cout << "Exiting gracefully..." << std::endl;
-            printErr("[INFO] Exiting gracefully...\n");
-            EXIT_FLAG = true;
-            CONNECTED = false;
+            //while(_getwch() != L'q');
             LEDThread.join();
             InputThread.join();
+            //std::cout << "Exiting gracefully..." << std::endl;
+            printErr("[INFO] Exiting gracefully...\n");
+            last_input_packet_id = 0;
+            EXIT_FLAG = true;
+            CONNECTED = false;
         }
     }
     return 0;
