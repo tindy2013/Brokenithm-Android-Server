@@ -26,7 +26,7 @@ static uint8_t aime_io_felica_id[8];
 static bool aime_io_aime_id_present;
 static bool aime_io_felica_id_present;
 
-struct IPCMemoryInfo
+struct aime_io_ipc_memory_info
 {
     uint8_t airIoStatus[6];
     uint8_t sliderIoStatus[32];
@@ -35,28 +35,31 @@ struct IPCMemoryInfo
     uint8_t serviceBtn;
     uint8_t coinInsertion;
     uint8_t cardRead;
+    uint8_t remoteCardRead;
+    uint8_t remoteCardType;
+    uint8_t remoteCardId[10];
 };
-typedef struct IPCMemoryInfo IPCMemoryInfo;
-static HANDLE FileMappingHandle;
-IPCMemoryInfo* FileMapping;
+typedef struct aime_io_ipc_memory_info aime_io_ipc_memory_info;
+static HANDLE aime_io_file_mapping_handle;
+aime_io_ipc_memory_info* aime_io_file_mapping;
 
-void initSharedMemory()
+void aime_io_init_shared_memory()
 {
-    if (FileMapping)
+    if (aime_io_file_mapping)
     {
         return;
     }
-    if ((FileMappingHandle = CreateFileMapping(INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, sizeof(IPCMemoryInfo), "Local\\BROKENITHM_SHARED_BUFFER")) == 0)
-    {
-        return;
-    }
-
-    if ((FileMapping = (IPCMemoryInfo*)MapViewOfFile(FileMappingHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(IPCMemoryInfo))) == 0)
+    if ((aime_io_file_mapping_handle = CreateFileMapping(INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, sizeof(aime_io_ipc_memory_info), "Local\\BROKENITHM_SHARED_BUFFER")) == 0)
     {
         return;
     }
 
-    memset(FileMapping, 0, sizeof(IPCMemoryInfo));
+    if ((aime_io_file_mapping = (aime_io_ipc_memory_info*)MapViewOfFile(aime_io_file_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(aime_io_ipc_memory_info))) == 0)
+    {
+        return;
+    }
+
+    memset(aime_io_file_mapping, 0, sizeof(aime_io_ipc_memory_info));
     SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_CONTINUOUS);
 }
 
@@ -196,17 +199,18 @@ static HRESULT aime_io_generate_felica(
     return S_OK;
 }
 
+uint16_t aime_io_get_api_version(void)
+{
+    return 0x0100;
+}
+
 HRESULT aime_io_init(void)
 {
     aime_io_config_read(&aime_io_cfg, L".\\segatools.ini");
 
-    initSharedMemory();
+    aime_io_init_shared_memory();
 
     return S_OK;
-}
-
-void aime_io_fini(void)
-{
 }
 
 HRESULT aime_io_nfc_poll(uint8_t unit_no)
@@ -223,11 +227,27 @@ HRESULT aime_io_nfc_poll(uint8_t unit_no)
     aime_io_aime_id_present = false;
     aime_io_felica_id_present = false;
 
+	/* First check remote card status, if there is one report it */
+
+	if (aime_io_file_mapping && aime_io_file_mapping->remoteCardRead) {
+		switch (aime_io_file_mapping->remoteCardType) {
+		case 0: // Aime
+			memcpy(aime_io_aime_id, aime_io_file_mapping->remoteCardId, 10);
+			aime_io_aime_id_present = true;
+			break;
+		case 1: // FeliCa
+			memcpy(aime_io_felica_id, aime_io_file_mapping->remoteCardId, 8);
+			aime_io_felica_id_present = true;
+			break;
+		}
+		return S_OK;
+	}
+
     /* Don't do anything more if the scan key is not held */
 
-    if (FileMapping && FileMapping->cardRead) {
+    if (aime_io_file_mapping && aime_io_file_mapping->cardRead) {
         sense = true;
-        FileMapping->cardRead = 0;
+        aime_io_file_mapping->cardRead = 0;
     } else {
         sense = GetAsyncKeyState(aime_io_cfg.vk_scan) & 0x8000;
     }

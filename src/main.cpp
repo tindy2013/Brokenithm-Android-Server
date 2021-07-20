@@ -8,6 +8,7 @@
 #include "socket.h"
 #include "defer.h"
 #include "version.h"
+#include "struct.h"
 #include <windows.h>
 
 std::string remote_address;
@@ -96,7 +97,7 @@ void printErr(const char* format, Args... args)
     fprintf(stderr, format, args...);
 }
 
-void UDPLEDBroadcast(SOCKET sHost, const char* memory)
+void UDPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
 {
     static std::string previous_status;
     static int skip_count = 0;
@@ -108,7 +109,7 @@ void UDPLEDBroadcast(SOCKET sHost, const char* memory)
             continue;
         }
         std::string current_status;
-        current_status.assign(reinterpret_cast<const char*>(memory + 6 + 32), 32 * 3);
+        current_status.assign(reinterpret_cast<const char*>(memory->ledRgbData), sizeof(memory->ledRgbData));
         bool same = true;
         if(!previous_status.empty())
         {
@@ -153,7 +154,7 @@ void UDPLEDBroadcast(SOCKET sHost, const char* memory)
     }
 }
 
-void TCPLEDBroadcast(SOCKET sHost, const char* memory)
+void TCPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
 {
     static std::string previous_status;
     static int skip_count = 0;
@@ -165,7 +166,7 @@ void TCPLEDBroadcast(SOCKET sHost, const char* memory)
             continue;
         }
         std::string current_status;
-        current_status.assign(reinterpret_cast<const char*>(memory + 6 + 32), 32 * 3);
+        current_status.assign(reinterpret_cast<const char*>(memory->ledRgbData), sizeof(memory->ledRgbData));
         bool same = true;
         if(!previous_status.empty())
         {
@@ -234,23 +235,22 @@ enum
     FUNCTION_CARD
 };
 
-std::tuple<std::string, uint16_t> getSocksAddress(const std::string &data)
+void getSocksAddress(const PacketConnect* pkt, std::string &address, uint16_t &port)
 {
     char cAddr[128] = {};
-    std::string retAddr, port_str = data.substr(1, 2);
-    int family = data[0];
-    uint16_t port = ntohs(*(short*)port_str.data());
+    std::string retAddr;
+    int family = pkt->addrType;
+    port = ntohs(pkt->port);
     switch(family)
     {
     case 1: //IPv4
-        inet_ntop(AF_INET, data.data() + 3, cAddr, 127);
+        inet_ntop(AF_INET, pkt->addr.addr4.addr, cAddr, 127);
         break;
     case 2: //IPv6
-        inet_ntop(AF_INET6, data.data() + 3, cAddr, 127);
+        inet_ntop(AF_INET6, pkt->addr.addr6, cAddr, 127);
         break;
     }
-    retAddr.assign(cAddr);
-    return std::make_tuple(retAddr, port);
+    address.assign(cAddr);
 }
 
 uint32_t last_input_packet_id = 0;
@@ -272,7 +272,85 @@ void updatePacketId(uint32_t newPacketId)
     last_input_packet_id = newPacketId;
 }
 
-void InputReceive(SOCKET sHost, char *memory)
+template <typename... Args>
+void dprintf(const char* format, Args... args)
+{
+    fprintf(stderr, format, args...);
+}
+
+void dump(const void *ptr, size_t nbytes, bool hex_string = false)
+{
+    const uint8_t *bytes;
+    uint8_t c;
+    size_t i;
+    size_t j;
+
+    if (nbytes == 0) {
+        dprintf("\t--- Empty ---\n");
+    }
+
+    bytes = (const unsigned char*)ptr;
+
+    if (hex_string) {
+        for (i = 0 ; i < nbytes ; i++) {
+            dprintf("%02x", bytes[i]);
+        }
+        dprintf("\n");
+        return;
+    }
+
+    for (i = 0 ; i < nbytes ; i += 16) {
+        dprintf("    %08x:", (int) i);
+
+        for (j = 0 ; i + j < nbytes && j < 16 ; j++) {
+            dprintf(" %02x", bytes[i + j]);
+        }
+
+        while (j < 16) {
+            dprintf("   ");
+            j++;
+        }
+
+        dprintf(" ");
+
+        for (j = 0 ; i + j < nbytes && j < 16 ; j++) {
+            c = bytes[i + j];
+
+            if (c < 0x20 || c >= 0x7F) {
+                c = '.';
+            }
+
+            dprintf("%c", c);
+        }
+
+        dprintf("\n");
+    }
+
+    dprintf("\n");
+}
+
+enum
+{
+    CARD_AIME,
+    CARD_FELICA
+};
+
+void printCardInfo(uint8_t cardType, uint8_t *cardId)
+{
+    switch(cardType)
+    {
+    case CARD_AIME:
+        printErr("[INFO] Card Type: Aime\t\tID: ");
+        dump(cardId, 10, true);
+        break;
+    case CARD_FELICA:
+        printErr("[INFO] Card Type: FeliCa\tIDm: ");
+        dump(cardId, 8, true);
+        break;
+    }
+}
+
+void InputReceive(SOCKET sHost, IPCMemoryInfo *memory)
 {
     char recv_buffer[tcp_buffer_size];
     char buffer[BUFSIZ];
@@ -280,6 +358,7 @@ void InputReceive(SOCKET sHost, char *memory)
     while(!EXIT_FLAG)
     {
         int recv_len, real_len;
+        size_t packet_len;
         uint32_t current_packet_id;
         if(!tcp_mode)
         {
@@ -293,6 +372,7 @@ void InputReceive(SOCKET sHost, char *memory)
             real_len = buffer[0];
             if(real_len > recv_len)
                 continue;
+            packet_len = real_len + 1;
         }
         else
         {
@@ -311,54 +391,52 @@ void InputReceive(SOCKET sHost, char *memory)
             real_len = remains[0];
             if(real_len > data_left)
                 continue;
-            size_t data_copied = real_len + 1;
-            memcpy(buffer, remains.data(), data_copied);
-            remains.erase(0, data_copied);
+            packet_len = real_len + 1;
+            memcpy(buffer, remains.data(), packet_len);
+            remains.erase(0, packet_len);
         }
 
-        if(real_len >= 3 + 4 + 6 + 32 && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P')
+        if(packet_len >= sizeof(PacketInput) && buffer[1] == 'I' && buffer[2] == 'N' && buffer[3] == 'P')
         {
-            memcpy(memory, buffer + 4 + 4, 32 + 6);
-            if(real_len > 3 + 4 + 6 + 32)
-            {
-                memcpy(memory + 6 + 32 + 96, buffer + 4 + 4 + 6 + 32, real_len - (3 + 6 + 32 + 4));
-            }
-            current_packet_id = ntohl(*(uint32_t*)(buffer + 4));
+            PacketInput *pkt = reinterpret_cast<PacketInput*>(buffer);
+            memcpy(memory->airIoStatus, pkt->airIoStatus, sizeof(pkt->airIoStatus));
+            memcpy(memory->sliderIoStatus, pkt->sliderIoStatus, sizeof(pkt->sliderIoStatus));
+            memory->testBtn = pkt->testBtn;
+            memory->serviceBtn = pkt->serviceBtn;
+            current_packet_id = ntohl(pkt->packetId);
             updatePacketId(current_packet_id);
         }
-        else if(real_len >= 3 + 4 + 32 && buffer[1] == 'I' && buffer[2] == 'P' && buffer[3] == 'T') /// without air block
+        else if(packet_len >= sizeof(PacketInputNoAir) && buffer[1] == 'I' && buffer[2] == 'P' && buffer[3] == 'T') /// without air block
         {
-            memcpy(memory + 6, buffer + 4 + 4, 32);
-            if(real_len > 3 + 4 + 32)
-            {
-                memcpy(memory + 6 + 32 + 96, buffer + 4 + 4 + 32, real_len - (3 + 32 + 4));
-            }
-            current_packet_id = ntohl(*(uint32_t*)(buffer + 4));
+            PacketInputNoAir *pkt = reinterpret_cast<PacketInputNoAir*>(buffer);
+            memcpy(memory->sliderIoStatus, pkt->sliderIoStatus, sizeof(pkt->sliderIoStatus));
+            memory->testBtn = pkt->testBtn;
+            memory->serviceBtn = pkt->serviceBtn;
+            current_packet_id = ntohl(pkt->packetId);
             updatePacketId(current_packet_id);
         }
-        else if(real_len >= 4 && buffer[1] == 'F' && buffer[2] == 'N' && buffer[3] == 'C')
+        else if(packet_len >= sizeof(PacketFunction) && buffer[1] == 'F' && buffer[2] == 'N' && buffer[3] == 'C')
         {
-            switch(buffer[4])
+            PacketFunction *pkt = reinterpret_cast<PacketFunction*>(buffer);
+            switch(pkt->funcBtn)
             {
             case FUNCTION_COIN:
-                *(memory + 6 + 32 + 96 + 2) = 1;
+                memory->coinInsertion = 1;
                 break;
             case FUNCTION_CARD:
-                *(memory + 6 + 32 + 96 + 3) = 1;
+                memory->cardRead = 1;
                 break;
             }
         }
-        else if(real_len >= 10 && buffer[1] == 'C' && buffer[2] == 'O' && buffer[3] == 'N')
+        else if(packet_len >= sizeof(PacketConnect) && buffer[1] == 'C' && buffer[2] == 'O' && buffer[3] == 'N')
         {
             last_input_packet_id = 0;
-            std::string data;
-            data.assign(buffer + 4, real_len - 3);
-            std::tie(remote_address, remote_port) = getSocksAddress(data);
-            //std::cout << "Device " << remote_address << ":" << remote_port << " connected." <<std::endl;
+            PacketConnect *pkt = reinterpret_cast<PacketConnect*>(buffer);
+            getSocksAddress(pkt, remote_address, remote_port);
             printErr("[INFO] Device %s:%d connected.\n", remote_address.data(), remote_port);
             CONNECTED = true;
         }
-        else if(real_len >= 3 && buffer[1] == 'D' && buffer[2] == 'I' && buffer[3] == 'S')
+        else if(packet_len >= 4 && buffer[1] == 'D' && buffer[2] == 'I' && buffer[3] == 'S')
         {
             CONNECTED = false;
             if(tcp_mode)
@@ -370,11 +448,10 @@ void InputReceive(SOCKET sHost, char *memory)
             if(!remote_address.empty())
             {
                 printErr("[INFO] Device %s:%d disconnected.\n", remote_address.data(), remote_port);
-                //std::cout << "Device " << remote_address << ":" << remote_port << " disconnected." << std::endl;
                 remote_address.clear();
             }
         }
-        else if(real_len >= 11 && buffer[1] == 'P' && buffer[2] == 'I' && buffer[3] == 'N')
+        else if(packet_len >= sizeof(PacketPing) && buffer[1] == 'P' && buffer[2] == 'I' && buffer[3] == 'N')
         {
             if(!CONNECTED)
                 continue;
@@ -382,6 +459,31 @@ void InputReceive(SOCKET sHost, char *memory)
             response.assign(buffer, 12);
             response.replace(2, 1, "O");
             udp_send(sHost, remote_address, remote_port, response);
+        }
+        else if(packet_len >= sizeof(PacketCard) && buffer[1] == 'C' && buffer[2] == 'R' && buffer[3] == 'D')
+        {
+            PacketCard *pkt = reinterpret_cast<PacketCard*>(buffer);
+            static uint8_t lastId[10] = {};
+            if(pkt->remoteCardRead)
+            {
+                if(memcmp(lastId, pkt->remoteCardId, 10))
+                {
+                    printErr("[INFO] Got remote card.\n");
+                    printCardInfo(pkt->remoteCardType, pkt->remoteCardId);
+                    memcpy(lastId, pkt->remoteCardId, 10);
+                }
+            }
+            else
+            {
+                if(memory->remoteCardRead)
+                {
+                    printErr("[INFO] Remote card removed.\n");
+                    memset(lastId, 0, 10);
+                }
+            }
+            memory->remoteCardRead = pkt->remoteCardRead;
+            memory->remoteCardType = pkt->remoteCardType;
+            memcpy(memory->remoteCardId, pkt->remoteCardId, 10);
         }
     }
 }
@@ -443,7 +545,7 @@ int main(int argc, char* argv[])
         }
     }
     defer(CloseHandle(hMapFile))
-    char *memory = reinterpret_cast<char*>(MapViewOfFileEx(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 1024, NULL));
+    IPCMemoryInfo *memory = reinterpret_cast<IPCMemoryInfo*>(MapViewOfFileEx(hMapFile, FILE_MAP_ALL_ACCESS, 0, 0, 1024, NULL));
     if(memory == nullptr)
     {
         //std::cerr << "Cannot get view of memory map! Error " + std::to_string(GetLastError());

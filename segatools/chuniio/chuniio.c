@@ -11,11 +11,12 @@ static unsigned int __stdcall chuni_io_slider_thread_proc(void *ctx);
 
 static bool chuni_io_coin;
 static uint16_t chuni_io_coins;
+static uint8_t chuni_io_hand_pos;
 static HANDLE chuni_io_slider_thread;
 static bool chuni_io_slider_stop_flag;
 static struct chuni_io_config chuni_io_cfg;
 
-struct IPCMemoryInfo
+struct chuni_io_ipc_memory_info
 {
     uint8_t airIoStatus[6];
     uint8_t sliderIoStatus[32];
@@ -24,36 +25,44 @@ struct IPCMemoryInfo
     uint8_t serviceBtn;
     uint8_t coinInsertion;
     uint8_t cardRead;
+    uint8_t remoteCardRead;
+    uint8_t remoteCardType;
+    uint8_t remoteCardId[10];
 };
-typedef struct IPCMemoryInfo IPCMemoryInfo;
-static HANDLE FileMappingHandle;
-IPCMemoryInfo* FileMapping;
+typedef struct chuni_io_ipc_memory_info chuni_io_ipc_memory_info;
+static HANDLE chuni_io_file_mapping_handle;
+chuni_io_ipc_memory_info* chuni_io_file_mapping;
 
-void initSharedMemory()
+void chuni_io_init_shared_memory()
 {
-    if (FileMapping)
+    if (chuni_io_file_mapping)
     {
         return;
     }
-    if ((FileMappingHandle = CreateFileMapping(INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, sizeof(IPCMemoryInfo), "Local\\BROKENITHM_SHARED_BUFFER")) == 0)
-    {
-        return;
-    }
-
-    if ((FileMapping = (IPCMemoryInfo*)MapViewOfFile(FileMappingHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(IPCMemoryInfo))) == 0)
+    if ((chuni_io_file_mapping_handle = CreateFileMapping(INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, sizeof(chuni_io_ipc_memory_info), "Local\\BROKENITHM_SHARED_BUFFER")) == 0)
     {
         return;
     }
 
-    memset(FileMapping, 0, sizeof(IPCMemoryInfo));
+    if ((chuni_io_file_mapping = (chuni_io_ipc_memory_info*)MapViewOfFile(chuni_io_file_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(chuni_io_ipc_memory_info))) == 0)
+    {
+        return;
+    }
+
+    memset(chuni_io_file_mapping, 0, sizeof(chuni_io_ipc_memory_info));
     SetThreadExecutionState(ES_DISPLAY_REQUIRED | ES_CONTINUOUS);
+}
+
+uint16_t chuni_io_get_api_version(void)
+{
+    return 0x0101;
 }
 
 HRESULT chuni_io_jvs_init(void)
 {
     chuni_io_config_load(&chuni_io_cfg, L".\\segatools.ini");
 
-    initSharedMemory();
+    chuni_io_init_shared_memory();
 
     return S_OK;
 }
@@ -64,9 +73,9 @@ void chuni_io_jvs_read_coin_counter(uint16_t *out)
         return;
     }
 
-    if (FileMapping && FileMapping->coinInsertion) {
+    if (chuni_io_file_mapping && chuni_io_file_mapping->coinInsertion) {
         chuni_io_coins++;
-        FileMapping->coinInsertion = 0;
+        chuni_io_file_mapping->coinInsertion = 0;
     } else {
         if (GetAsyncKeyState(chuni_io_cfg.vk_coin)) {
             if (!chuni_io_coin) {
@@ -85,23 +94,30 @@ void chuni_io_jvs_poll(uint8_t *opbtn, uint8_t *beams)
 {
     size_t i;
 
-    if ((FileMapping && FileMapping->testBtn) || GetAsyncKeyState(chuni_io_cfg.vk_test)) {
+    if ((chuni_io_file_mapping && chuni_io_file_mapping->testBtn) || GetAsyncKeyState(chuni_io_cfg.vk_test)) {
         *opbtn |= 0x01; /* Test */
     }
 
-    if ((FileMapping && FileMapping->serviceBtn) || GetAsyncKeyState(chuni_io_cfg.vk_service)) {
+    if ((chuni_io_file_mapping && chuni_io_file_mapping->serviceBtn) || GetAsyncKeyState(chuni_io_cfg.vk_service)) {
         *opbtn |= 0x02; /* Service */
     }
 
+    if (GetAsyncKeyState(chuni_io_cfg.vk_ir)) {
+        if (chuni_io_hand_pos < 6) {
+            chuni_io_hand_pos++;
+        }
+    } else {
+        if (chuni_io_hand_pos > 0) {
+            chuni_io_hand_pos--;
+        }
+    }
+
     for (i = 0 ; i < 6 ; i++) {
-        if (FileMapping && FileMapping->airIoStatus[i]) {
+        if ((chuni_io_file_mapping && chuni_io_file_mapping->airIoStatus[i]) || chuni_io_hand_pos > i) {
             *beams |= (1 << i);
         }
     }
 }
-
-void chuni_io_jvs_set_coin_blocker(bool open)
-{}
 
 HRESULT chuni_io_slider_init(void)
 {
@@ -139,22 +155,21 @@ void chuni_io_slider_stop(void)
 
 void chuni_io_slider_set_leds(const uint8_t *rgb)
 {
-    if (FileMapping)
-    {
-        memcpy(FileMapping->ledRgbData, rgb, 32 * 3);
+	if (chuni_io_file_mapping) {
+        memcpy(chuni_io_file_mapping->ledRgbData, rgb, 32 * 3);
     }
 }
 
 static unsigned int __stdcall chuni_io_slider_thread_proc(void *ctx)
 {
     chuni_io_slider_callback_t callback;
-    uint8_t pressure[32] = { 0 };
+    uint8_t pressure[32];
 
     callback = ctx;
 
     while (!chuni_io_slider_stop_flag) {
-        if (FileMapping) {
-            memcpy(pressure, FileMapping->sliderIoStatus, 32);
+        if (chuni_io_file_mapping) {
+            memcpy(pressure, chuni_io_file_mapping->sliderIoStatus, 32);
         }
 
         callback(pressure);
