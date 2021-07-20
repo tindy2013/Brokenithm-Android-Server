@@ -1,6 +1,9 @@
 #ifndef STRUCT_H_INCLUDED
 #define STRUCT_H_INCLUDED
 
+#pragma pack(push)
+#pragma pack(1)
+
 struct IPCMemoryInfo
 {
     uint8_t airIoStatus[6];
@@ -75,5 +78,7 @@ struct PacketPing
     uint8_t packetName[3];
     uint64_t remotePingTime;
 };
+
+#pragma pack(pop)
 
 #endif // STRUCT_H_INCLUDED
