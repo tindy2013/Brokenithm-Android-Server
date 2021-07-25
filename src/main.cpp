@@ -21,21 +21,13 @@ size_t tcp_receive_threshold = 48;
 
 std::atomic_bool EXIT_FLAG {false}, CONNECTED {false};
 
-int setTimeout(SOCKET s, int timeout)
+void socketSetTimeout(SOCKET sHost, int timeout)
 {
-    int ret = -1;
-#ifdef _WIN32
-    ret = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(int));
-    ret = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(int));
-#else
-    struct timeval timeo = {timeout / 1000, (timeout % 1000) * 1000};
-    ret = setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeo, sizeof(timeo));
-    ret = setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeo, sizeof(timeo));
-#endif
-    return ret;
+    setsockopt(sHost, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(int));
+    setsockopt(sHost, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(int));
 }
 
-int socket_bind(SOCKET sHost, long addr, uint16_t port)
+int socketBind(SOCKET sHost, long addr, uint16_t port)
 {
     sockaddr_in srcaddr = {};
     memset(&srcaddr, 0, sizeof(srcaddr));
@@ -45,22 +37,27 @@ int socket_bind(SOCKET sHost, long addr, uint16_t port)
     return bind(sHost, reinterpret_cast<sockaddr*>(&srcaddr), sizeof(srcaddr));
 }
 
-int udp_broadcast(SOCKET sHost, uint16_t port, const std::string &data)
+sockaddr_in makeBroadcastAddr(uint16_t port)
 {
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_BROADCAST);
     addr.sin_port = htons(port);
-    return sendto(sHost, data.data(), data.size(), 0, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    return addr;
 }
 
-int udp_send(SOCKET sHost, const std::string &dst_host, uint16_t dst_port, const std::string &data)
+sockaddr_in makeIPv4Addr(const std::string &host, uint16_t port)
 {
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    inet_pton(AF_INET, dst_host.data(), (struct in_addr *)&addr.sin_addr.s_addr);
-    addr.sin_port = htons(dst_port);
-    return sendto(sHost, data.data(), data.size(), 0, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr));
+    inet_pton(AF_INET, host.data(), (struct in_addr *)&addr.sin_addr.s_addr);
+    addr.sin_port = htons(port);
+    return addr;
+}
+
+int socketSendTo(SOCKET sHost, const sockaddr_in &addr, const std::string &data)
+{
+    return sendto(sHost, data.data(), data.size(), 0, reinterpret_cast<const struct sockaddr*>(&addr), sizeof(addr));
 }
 
 std::string getTime(int type)
@@ -97,11 +94,12 @@ void printErr(const char* format, Args... args)
     fprintf(stderr, format, args...);
 }
 
-void UDPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
+void threadLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
 {
     static std::string previous_status;
     static int skip_count = 0;
     static std::string head = "\x63LED";
+    auto addr = makeIPv4Addr(remote_address, remote_port);
     while(!EXIT_FLAG)
     {
         if(!CONNECTED) {
@@ -113,13 +111,10 @@ void UDPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
         bool same = true;
         if(!previous_status.empty())
         {
-            for(int i = 0; i < 32 * 3; i++)
+            if(memcmp(previous_status.data(), current_status.data(), previous_status.size()) != 0)
             {
-                if(previous_status[i] != current_status[i])
-                {
-                    same = false;
-                    break;
-                }
+                same = false;
+                break;
             }
         }
         else
@@ -128,88 +123,11 @@ void UDPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
         if(!same)
         {
             current_status.insert(0, head);
-            //if(udp_broadcast(sHost, server_port, current_status) < 0)
-            if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
-            {
-                //std::cerr<<"cannot send broadcast: error " + std::to_string(GetLastError()) + "\n";
-                printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
-            }
-            skip_count = 0;
-        }
-        else
-        {
-            if(++skip_count > 50)
-            {
-                current_status.insert(0, head);
-                //if(udp_broadcast(sHost, server_port, current_status) < 0)
-                if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
-                {
-                    //std::cerr<<"cannot send broadcast: error " + std::to_string(GetLastError()) + "\n";
-                    printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
-                }
-                skip_count = 0;
-            }
-        }
-        Sleep(10);
-    }
-}
-
-void TCPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
-{
-    static std::string previous_status;
-    static int skip_count = 0;
-    static std::string head = "\x63LED";
-    while(!EXIT_FLAG)
-    {
-        if(!CONNECTED) {
-            Sleep(50);
-            continue;
-        }
-        std::string current_status;
-        current_status.assign(reinterpret_cast<const char*>(memory->ledRgbData), sizeof(memory->ledRgbData));
-        bool same = true;
-        if(!previous_status.empty())
-        {
-            for(int i = 0; i < 32 * 3; i++)
-            {
-                if(previous_status[i] != current_status[i])
-                {
-                    same = false;
-                    break;
-                }
-            }
-        }
-        else
-            same = false;
-        previous_status = current_status;
-        if(!same)
-        {
-            current_status.insert(0, head);
-            if(send(sHost, current_status.data(), current_status.size(), 0) < 0)
+            if(socketSendTo(sHost, addr, current_status) < 0)
             {
                 printErr("[Error] Cannot send packet: error %lu\n", GetLastError());
-                if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
+                if(tcp_mode)
                 {
-                    continue;
-                }
-                else
-                {
-                    printErr("[INFO] Device disconnected!\n");
-                    CONNECTED = false;
-                    EXIT_FLAG = true;
-                    break;
-                }
-            }
-            skip_count = 0;
-        }
-        else
-        {
-            if(++skip_count > 50)
-            {
-                current_status.insert(0, head);
-                if(udp_send(sHost, remote_address, remote_port, current_status) < 0)
-                {
-                    printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
                     if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
                     {
                         continue;
@@ -220,6 +138,32 @@ void TCPLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
                         CONNECTED = false;
                         EXIT_FLAG = true;
                         break;
+                    }
+                }
+            }
+            skip_count = 0;
+        }
+        else
+        {
+            if(++skip_count > 50)
+            {
+                current_status.insert(0, head);
+                if(socketSendTo(sHost, addr, current_status) < 0)
+                {
+                    printErr("[ERROR] Cannot send packet: error %lu\n", GetLastError());
+                    if(tcp_mode)
+                    {
+                        if(errno == EINTR || errno == EWOULDBLOCK || errno == EAGAIN)
+                        {
+                            continue;
+                        }
+                        else
+                        {
+                            printErr("[INFO] Device disconnected!\n");
+                            CONNECTED = false;
+                            EXIT_FLAG = true;
+                            break;
+                        }
                     }
                 }
                 skip_count = 0;
@@ -350,11 +294,12 @@ void printCardInfo(uint8_t cardType, uint8_t *cardId)
     }
 }
 
-void InputReceive(SOCKET sHost, IPCMemoryInfo *memory)
+void threadInputReceive(SOCKET sHost, IPCMemoryInfo *memory)
 {
     char recv_buffer[tcp_buffer_size];
     char buffer[BUFSIZ];
     std::string remains;
+    auto addr = makeIPv4Addr(remote_address, remote_port);
     while(!EXIT_FLAG)
     {
         int recv_len, real_len;
@@ -458,7 +403,7 @@ void InputReceive(SOCKET sHost, IPCMemoryInfo *memory)
             std::string response;
             response.assign(buffer, 12);
             response.replace(2, 1, "O");
-            udp_send(sHost, remote_address, remote_port, response);
+            socketSendTo(sHost, addr, response);
         }
         else if(packet_len >= sizeof(PacketCard) && buffer[1] == 'C' && buffer[2] == 'R' && buffer[3] == 'D')
         {
@@ -557,16 +502,12 @@ int main(int argc, char* argv[])
         printErr("[INFO] Mode: UDP\n");
         SOCKET sHost = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         defer(closesocket(sHost))
-        setTimeout(sHost, 2000);
-        int broadcastEnable = 1;
-        setsockopt(sHost, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<char*>(&broadcastEnable), sizeof(broadcastEnable));
-        socket_bind(sHost, htonl(INADDR_ANY), server_port);
-        //std::cout << "Waiting for device on port " << server_port << "..." << std::endl;
+        socketSetTimeout(sHost, 2000);
+        socketBind(sHost, htonl(INADDR_ANY), server_port);
         printErr("[INFO] Waiting for device on port %d...\n", server_port);
-        auto LEDThread = std::thread(UDPLEDBroadcast, sHost, memory);
-        auto InputThread = std::thread(InputReceive, sHost, memory);
+        auto LEDThread = std::thread(threadLEDBroadcast, sHost, memory);
+        auto InputThread = std::thread(threadInputReceive, sHost, memory);
         while(_getwch() != L'q');
-        //std::cout << "Exiting gracefully..." << std::endl;
         printErr("[INFO] Exiting gracefully...\n");
         last_input_packet_id = 0;
         EXIT_FLAG = true;
@@ -580,8 +521,8 @@ int main(int argc, char* argv[])
         printErr("[INFO] TCP receive threshold: %" PRIu32 "\n", tcp_receive_threshold);
         SOCKET sHost = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         defer(closesocket(sHost));
-        setTimeout(sHost, 50);
-        socket_bind(sHost, htonl(INADDR_ANY), server_port);
+        socketSetTimeout(sHost, 50);
+        socketBind(sHost, htonl(INADDR_ANY), server_port);
         listen(sHost, 10);
         while(true)
         {
@@ -598,12 +539,10 @@ int main(int argc, char* argv[])
             }
             CONNECTED = true;
             EXIT_FLAG = false;
-            auto LEDThread = std::thread(TCPLEDBroadcast, acc_socket, memory);
-            auto InputThread = std::thread(InputReceive, acc_socket, memory);
-            //while(_getwch() != L'q');
+            auto LEDThread = std::thread(threadLEDBroadcast, acc_socket, memory);
+            auto InputThread = std::thread(threadInputReceive, acc_socket, memory);
             LEDThread.join();
             InputThread.join();
-            //std::cout << "Exiting gracefully..." << std::endl;
             printErr("[INFO] Exiting gracefully...\n");
             last_input_packet_id = 0;
             EXIT_FLAG = true;
