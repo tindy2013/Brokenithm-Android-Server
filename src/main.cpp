@@ -111,11 +111,7 @@ void threadLEDBroadcast(SOCKET sHost, const IPCMemoryInfo* memory)
         bool same = true;
         if(!previous_status.empty())
         {
-            if(memcmp(previous_status.data(), current_status.data(), previous_status.size()) != 0)
-            {
-                same = false;
-                break;
-            }
+            same = (memcmp(previous_status.data(), current_status.data(), previous_status.size()) == 0);
         }
         else
             same = false;
